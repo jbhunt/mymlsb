@@ -3,11 +3,11 @@ import numpy as np
 
 def loadMlati(
     filename,
-    binsizeVelocity=0.01,
+    binsizeVelocity=0.005,
     binsizeSpiking=0.1,
     offsetSpinking=0,
-    trange=(None, 600),
-    minimumSpikeCount=1000,
+    trange=(None, None),
+    minimumFiringRate=0.1,
     ):
     """
     """
@@ -32,10 +32,11 @@ def loadMlati(
 
     #
     vRaw = np.diff(eyePosition)
+    vRaw[np.isnan(vRaw)] = np.interp(tRaw[np.isnan(vRaw)], tRaw, vRaw) # Impute with interpolation
     leftEdges = np.arange(tmin, tmax, binsizeVelocity)
     rightEdges = leftEdges + binsizeVelocity
     binEdges = np.vstack([leftEdges, rightEdges]).T
-    y = np.interp(binEdges.mean(1), tRaw, vRaw).reshape(-1, 1)
+    y = np.interp(binEdges.mean(1), tRaw, vRaw, left=np.nan, right=np.nan).reshape(-1, 1)
 
     #
     X = list()
@@ -44,8 +45,6 @@ def loadMlati(
         end = '\r' if iUnit + 1 != nUnits else '\n'
         print(f'Working on unit {iUnit + 1} out of {nUnits} ...', end=end)
         spikeIndices = np.where(spikeClusters == cluster)[0]
-        if spikeIndices.size < minimumSpikeCount:
-            continue
         t = spikeTimestamps[spikeIndices]
         x = list()
         for t2 in leftEdges:
@@ -53,8 +52,13 @@ def loadMlati(
             t1 = t2 - binsizeSpiking
             fr = np.sum(np.logical_and(t >= t1, t < t2)) / binsizeSpiking
             x.append(fr)
+        if np.mean(x) < minimumFiringRate:
+            continue
         X.append(x)
 
-    X  = np.array(X).T
+    #
+    X = np.array(X).T
+    X = np.delete(X, np.isnan(y).flatten(), axis=0)
+    y = np.delete(y, np.isnan(y).flatten(), axis=0)
 
     return X, y
