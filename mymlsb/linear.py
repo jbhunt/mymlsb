@@ -58,3 +58,32 @@ class MultipleLinearRegression():
         y = X @ self.betas[1:] + self.betas[0]
 
         return y
+    
+class RidgeRegression():
+    """
+    """
+
+    def __init__(self, lambda_=0.0):
+        """
+        """
+
+        self.betas = None
+        self.lambda_ = lambda_
+
+        return
+    
+    def fit(self, X, y):
+        """
+        """
+
+        R = np.hstack([np.ones(X.shape[0]).reshape(-1, 1), X])
+        self.betas = np.linalg.inv(R.T @ R + self.lambda_ @ np.eye(R.shape[1])) @ R.T @ y
+        self.betas = self.betas.reshape(-1, 1)
+
+        return
+    
+    def predict(self, X):
+        """
+        """
+
+        return X @ self.betas[1:] + self.betas[0]

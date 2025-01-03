@@ -1,5 +1,7 @@
 import h5py
 import numpy as np
+from sklearn.decomposition import PCA
+from myphdlib.general.toolkit import psth2
 
 def loadMlati(
     filename,
@@ -60,5 +62,164 @@ def loadMlati(
     X = np.array(X).T
     X = np.delete(X, np.isnan(y).flatten(), axis=0)
     y = np.delete(y, np.isnan(y).flatten(), axis=0)
+
+    return X, y
+
+def loadMlatiForRidge(
+    filename,
+    binsize=0.01,
+    windowForSpikes=(-0.1, 0.1),
+    windowForVelocity=(-0.1, 0.1),
+    maximumProbabilityValue=None,
+    ):
+    """
+    Compute firing rate for all units at a range of time lags (X). Eye velocity
+    (y) is sampled from around the time of saccade onset.
+    """
+
+    # Load datasets
+    with h5py.File(filename, 'r') as stream:
+        eyePosition = np.array(stream[f'pose/filtered'])[:, :2]
+        frameTimestamps = np.array(stream[f'frames/left/timestamps'])
+        saccadeTimestamps = np.array(stream[f'saccades/predicted/left/timestamps'])[:, 0]
+        spikeTimestamps = np.array(stream[f'spikes/timestamps'])
+        spikeClusters = np.array(stream[f'spikes/clusters'])
+        pValues = np.vstack([
+            np.array(stream['zeta/saccade/nasal/p']),
+            np.array(stream['zeta/saccade/temporal/p'])
+        ]).min(0)
+
+    # Compute velocity
+    tRaw = frameTimestamps[0] + np.cumsum(np.diff(frameTimestamps))
+    vRaw = np.diff(eyePosition, axis=0)
+    for j in range(vRaw.shape[1]):
+        i = np.where(np.isnan(vRaw[:, j]))[0]
+        vRaw[i, j] = np.interp(tRaw[i], tRaw, vRaw[:, j]) # Impute with interpolation
+
+    #
+    uniqueClusters = np.unique(spikeClusters)
+    if maximumProbabilityValue is None:
+        targetClusters = uniqueClusters
+    else:
+        clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
+        targetClusters = uniqueClusters[clusterIndices]
+
+    #
+    X = list()
+    y = list()
+    binCenters, M = psth2(np.array([0,]), np.array([0,]), window=windowForVelocity, binsize=binsize)
+    n = saccadeTimestamps.size * len(binCenters) * len(targetClusters)
+    counter = 0
+    for saccadeTimestamp in saccadeTimestamps:
+        for dt in binCenters:
+            Xi = np.array([])
+            yi = np.array([
+                np.interp(saccadeTimestamp + dt, tRaw, vRaw[:, 0]),
+                np.interp(saccadeTimestamp + dt, tRaw, vRaw[:, 1]),
+            ])
+            for spikeCluster in targetClusters:
+                end = '\r' if counter + 1 != n else '\n'
+                percent = counter / n * 100
+                print(f'Working on combination {counter + 1} out of {n} ... ({percent:.1f}%)', end=end)
+                spikeIndices = np.where(spikeClusters == spikeCluster)[0]
+                t, M = psth2(
+                    np.array([saccadeTimestamp + dt,]),
+                    spikeTimestamps[spikeIndices],
+                    window=windowForSpikes,
+                    binsize=binsize
+                )
+                Xi = np.concatenate([Xi, M.flatten() / binsize])
+                counter += 1
+            X.append(Xi)
+            y.append(yi)
+    
+    #
+    X = np.array(X)
+    y = np.array(y)
+
+    return X, y
+
+def loadMlatiWithPCA(
+    filename,
+    binsize=0.01,
+    windowForSpikes=(-0.1, 0.1),
+    windowForSaccades=(-0.1, 0.1),
+    maximumProbabilityValue=None,
+    ):
+    """
+    """
+
+    # Load datasets
+    with h5py.File(filename, 'r') as stream:
+        eyePosition = np.array(stream[f'pose/filtered'])[:, :2]
+        frameTimestamps = np.array(stream[f'frames/left/timestamps'])
+        saccadeTimestamps = np.array(stream[f'saccades/predicted/left/timestamps'])[:, 0]
+        spikeTimestamps = np.array(stream[f'spikes/timestamps'])
+        spikeClusters = np.array(stream[f'spikes/clusters'])
+        pValues = np.vstack([
+            np.array(stream['zeta/saccade/nasal/p']),
+            np.array(stream['zeta/saccade/temporal/p'])
+        ]).min(0)
+
+    # Compute velocity
+    tRaw = frameTimestamps[0] + np.cumsum(np.diff(frameTimestamps))
+    vRaw = np.diff(eyePosition, axis=0)
+    for j in range(vRaw.shape[1]):
+        i = np.where(np.isnan(vRaw[:, j]))[0]
+        vRaw[i, j] = np.interp(tRaw[i], tRaw, vRaw[:, j]) # Impute with interpolation
+
+    #
+    uniqueClusters = np.unique(spikeClusters)
+    if maximumProbabilityValue is None:
+        targetClusters = uniqueClusters
+    else:
+        clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
+        targetClusters = uniqueClusters[clusterIndices]
+
+    #
+    t1 = np.floor(tRaw.min())
+    t2 = np.ceil(tRaw.max())
+    bins = np.arange(t1, t2 + binsize, binsize)
+    xFull = np.full([bins.size - 1, len(targetClusters)], np.nan, dtype=np.float32)
+    for j, spikeCluster in enumerate(targetClusters):
+        counts, edges = np.histogram(
+            spikeTimestamps[spikeClusters == spikeCluster],
+            bins=bins
+        )
+        fr = (counts - counts.mean()) / counts.std()
+        xFull[:, j] = fr
+    xReduced = PCA(n_components=1).fit_transform(xFull)
+    del xFull
+    tReduced = bins[:-1] + ((bins[1] - bins[0]) / 2)
+    return xReduced, tReduced
+
+    # TODO: Figure out why activity along PC1 doesn't show visual response
+
+    #
+    X = list()
+    y = list()
+    binsForVelocity, M = psth2(np.array([0,]), np.array([0,]), window=windowForSaccades, binsize=binsize)
+    binsForSpikes, M = psth2(np.array([0,]), np.array([0,]), window=windowForSpikes, binsize=binsize)
+    n = saccadeTimestamps.size * binsForVelocity.size * binsForSpikes.size
+    counter = 0
+    for saccadeTimestamp in saccadeTimestamps:
+        for dtVelocity in binsForVelocity:
+            yi = np.array([
+                np.interp(saccadeTimestamp + dtVelocity, tRaw, vRaw[:, 0]),
+                np.interp(saccadeTimestamp + dtVelocity, tRaw, vRaw[:, 1]),
+            ])
+            Xi = list()
+            for dtSpikes in binsForSpikes:
+                end = '\r' if counter + 1 != n else '\n'
+                percent = counter / n * 100
+                print(f'Working on combination {counter + 1} out of {n} ... ({percent:.1f}%)', end=end)
+                ti = saccadeTimestamp + dtVelocity + dtSpikes
+                Xi.append(np.interp(ti, tReduced, xReduced.flatten()).item())
+                counter += 1
+            Xi = np.array(Xi)
+            X.append(Xi)
+            y.append(yi)
+    X = np.array(X)
+    y = np.array(y)
 
     return X, y
