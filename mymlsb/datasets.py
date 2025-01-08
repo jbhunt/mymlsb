@@ -223,3 +223,158 @@ def loadMlatiWithPCA(
     y = np.array(y)
 
     return X, y
+
+def getTimeRange(
+    filename,
+    ):
+    """
+    """
+
+    with h5py.File(filename, 'r') as stream:
+        spikeTimestamps = np.array(stream['spikes/timestamps'])
+    t1 = np.floor(spikeTimestamps.min())
+    t2 = np.ceil(spikeTimestamps.max())
+
+    return t1, t2
+
+def loadEyeVelocity(
+    filename,
+    ):
+    """
+    """
+
+    return
+
+def loadGratingContrast(
+    filename,
+    binsize=0.005,
+    riseTime=0.001,
+    probeDuration=0.05,
+    ):
+    """
+    """
+
+    #
+    t1, t2 = getTimeRange(filename)
+    t = np.arange(t1, t2, binsize) + (binsize / 2)
+
+    #
+    with h5py.File(filename, 'r') as stream:
+        probeTimestamps = np.array(stream['stimuli/dg/probe/timestamps'])
+    
+    #
+    xp = np.concatenate([
+        probeTimestamps - riseTime,
+        probeTimestamps,
+        probeTimestamps + probeDuration,
+        probeTimestamps + probeDuration + riseTime
+    ])
+    index = np.argsort(xp)
+    xp = xp[index]
+    fp = np.concatenate([
+        np.zeros(probeTimestamps.size),
+        np.ones(probeTimestamps.size),
+        np.ones(probeTimestamps.size),
+        np.zeros(probeTimestamps.size),
+    ])
+    fp = fp[index]
+
+    return t, np.interp(t, xp, fp)
+
+def loadNeuralData(
+    filename,
+    binsize=0.005,
+    maximumProbabilityValue=0.001,
+    ):
+    """
+    """
+
+    # Load datasets
+    with h5py.File(filename, 'r') as stream:
+        spikeTimestamps = np.array(stream[f'spikes/timestamps'])
+        spikeClusters = np.array(stream[f'spikes/clusters'])
+        pValues = np.vstack([
+            np.array(stream['zeta/probe/left/p']),
+            np.array(stream['zeta/probe/right/p'])
+        ]).min(0)
+
+    #
+    uniqueClusters = np.unique(spikeClusters)
+    if maximumProbabilityValue is None:
+        targetClusters = uniqueClusters
+    else:
+        clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
+        targetClusters = uniqueClusters[clusterIndices]
+
+    #
+    t1, t2 = getTimeRange(filename)
+    bins = np.arange(t1, t2 + binsize, binsize)
+    t = bins[:-1] + (binsize / 2)
+    xFull = np.full([bins.size - 1, len(targetClusters)], np.nan, dtype=np.float32)
+    for j, spikeCluster in enumerate(targetClusters):
+        counts, edges = np.histogram(
+            spikeTimestamps[spikeClusters == spikeCluster],
+            bins=bins
+        )
+        # fr = (counts - counts.mean()) / counts.std()
+        fr = counts / binsize
+        xFull[:, j] = fr
+
+    return t, xFull
+
+def lag(
+    X,
+    y,
+    t,
+    lags=[0,],
+    nSamples=100,
+    eventTimestamps=None,
+    eventWindow=[-0.1, 0.1],
+    ):
+    """
+    """
+
+    #
+    if eventTimestamps is None:
+        tEval = np.linspace(
+            low=t.min(),
+            high=t.max(),
+            size=nSamples + 2
+        )[1:-1]
+    else:
+        tEval = list()
+        eventIndices = np.random.choice(np.arange(eventTimestamps.size), size=nSamples, replace=True)
+        eventIndices.sort()
+        for eventTimestamp in eventTimestamps[eventIndices]:
+            if np.isnan(eventTimestamp):
+                continue
+            t1 = eventTimestamp + eventWindow[0]
+            t2 = eventTimestamp + eventWindow[1]
+            tEval.append(np.random.uniform(
+                low=t1,
+                high=t2,
+                size=1
+            ).item())
+        tEval = np.array(tEval)
+
+    #
+    xLag = np.full([nSamples, len(lags)], np.nan)
+    yLag = np.full([nSamples, 1], np.nan)
+
+    #
+    for i, ti in enumerate(tEval):
+        end = '\r' if (i + 1) < nSamples else '\n'
+        print(f'Generating sample {i + 1} out of {nSamples} ...', end=end)
+        for j, lag in enumerate(lags):
+            xLag[i, j] = np.interp(
+                ti + lag,
+                t,
+                X.flatten()
+            )
+        yLag[i, 0] = np.around(np.interp(
+            ti,
+            t,
+            y.flatten()
+        ), 0).item()
+
+    return xLag, yLag, tEval   
