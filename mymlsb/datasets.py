@@ -3,287 +3,28 @@ import numpy as np
 from sklearn.decomposition import PCA
 from myphdlib.general.toolkit import psth2
 
-def loadMlati(
-    filename,
-    binsizeVelocity=0.005,
-    binsizeSpiking=0.1,
-    offsetSpinking=0,
-    trange=(None, None),
-    minimumFiringRate=0.1,
-    ):
-    """
-    """
-
-    with h5py.File(filename, 'r') as stream:
-        eyePosition = np.array(stream['pose/filtered'])[:, 0]
-        frameTimestamps = np.array(stream['frames/left/timestamps'])
-        spikeTimestamps = np.array(stream['spikes/timestamps'])
-        spikeClusters = np.array(stream['spikes/clusters'])
-
-    #
-    tRaw = frameTimestamps[0] + np.cumsum(np.diff(frameTimestamps))
-    if trange[0] is None:
-        tmin = np.floor(tRaw.min())
-    else:
-        tmin = trange[0]
-    if trange[1] is None:
-        tmax = np.ceil(tRaw.max())
-    else:
-        tmax = trange[1]
-
-
-    #
-    vRaw = np.diff(eyePosition)
-    vRaw[np.isnan(vRaw)] = np.interp(tRaw[np.isnan(vRaw)], tRaw, vRaw) # Impute with interpolation
-    leftEdges = np.arange(tmin, tmax, binsizeVelocity)
-    rightEdges = leftEdges + binsizeVelocity
-    binEdges = np.vstack([leftEdges, rightEdges]).T
-    y = np.interp(binEdges.mean(1), tRaw, vRaw, left=np.nan, right=np.nan).reshape(-1, 1)
-
-    #
-    X = list()
-    nUnits = len(np.unique(spikeClusters))
-    for iUnit, cluster in enumerate(np.unique(spikeClusters)):
-        end = '\r' if iUnit + 1 != nUnits else '\n'
-        print(f'Working on unit {iUnit + 1} out of {nUnits} ...', end=end)
-        spikeIndices = np.where(spikeClusters == cluster)[0]
-        t = spikeTimestamps[spikeIndices]
-        x = list()
-        for t2 in leftEdges:
-            t2 -= offsetSpinking
-            t1 = t2 - binsizeSpiking
-            fr = np.sum(np.logical_and(t >= t1, t < t2)) / binsizeSpiking
-            x.append(fr)
-        if np.mean(x) < minimumFiringRate:
-            continue
-        X.append(x)
-
-    #
-    X = np.array(X).T
-    X = np.delete(X, np.isnan(y).flatten(), axis=0)
-    y = np.delete(y, np.isnan(y).flatten(), axis=0)
-
-    return X, y
-
-def loadMlatiForRidge(
-    filename,
-    binsize=0.01,
-    windowForSpikes=(-0.1, 0.1),
-    windowForVelocity=(-0.1, 0.1),
-    maximumProbabilityValue=None,
-    ):
-    """
-    Compute firing rate for all units at a range of time lags (X). Eye velocity
-    (y) is sampled from around the time of saccade onset.
-    """
-
-    # Load datasets
-    with h5py.File(filename, 'r') as stream:
-        eyePosition = np.array(stream[f'pose/filtered'])[:, :2]
-        frameTimestamps = np.array(stream[f'frames/left/timestamps'])
-        saccadeTimestamps = np.array(stream[f'saccades/predicted/left/timestamps'])[:, 0]
-        spikeTimestamps = np.array(stream[f'spikes/timestamps'])
-        spikeClusters = np.array(stream[f'spikes/clusters'])
-        pValues = np.vstack([
-            np.array(stream['zeta/saccade/nasal/p']),
-            np.array(stream['zeta/saccade/temporal/p'])
-        ]).min(0)
-
-    # Compute velocity
-    tRaw = frameTimestamps[0] + np.cumsum(np.diff(frameTimestamps))
-    vRaw = np.diff(eyePosition, axis=0)
-    for j in range(vRaw.shape[1]):
-        i = np.where(np.isnan(vRaw[:, j]))[0]
-        vRaw[i, j] = np.interp(tRaw[i], tRaw, vRaw[:, j]) # Impute with interpolation
-
-    #
-    uniqueClusters = np.unique(spikeClusters)
-    if maximumProbabilityValue is None:
-        targetClusters = uniqueClusters
-    else:
-        clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
-        targetClusters = uniqueClusters[clusterIndices]
-
-    #
-    X = list()
-    y = list()
-    binCenters, M = psth2(np.array([0,]), np.array([0,]), window=windowForVelocity, binsize=binsize)
-    n = saccadeTimestamps.size * len(binCenters) * len(targetClusters)
-    counter = 0
-    for saccadeTimestamp in saccadeTimestamps:
-        for dt in binCenters:
-            Xi = np.array([])
-            yi = np.array([
-                np.interp(saccadeTimestamp + dt, tRaw, vRaw[:, 0]),
-                np.interp(saccadeTimestamp + dt, tRaw, vRaw[:, 1]),
-            ])
-            for spikeCluster in targetClusters:
-                end = '\r' if counter + 1 != n else '\n'
-                percent = counter / n * 100
-                print(f'Working on combination {counter + 1} out of {n} ... ({percent:.1f}%)', end=end)
-                spikeIndices = np.where(spikeClusters == spikeCluster)[0]
-                t, M = psth2(
-                    np.array([saccadeTimestamp + dt,]),
-                    spikeTimestamps[spikeIndices],
-                    window=windowForSpikes,
-                    binsize=binsize
-                )
-                Xi = np.concatenate([Xi, M.flatten() / binsize])
-                counter += 1
-            X.append(Xi)
-            y.append(yi)
-    
-    #
-    X = np.array(X)
-    y = np.array(y)
-
-    return X, y
-
-def loadMlatiWithPCA(
-    filename,
-    binsize=0.01,
-    windowForSpikes=(-0.1, 0.1),
-    windowForSaccades=(-0.1, 0.1),
-    maximumProbabilityValue=None,
-    ):
-    """
-    """
-
-    # Load datasets
-    with h5py.File(filename, 'r') as stream:
-        eyePosition = np.array(stream[f'pose/filtered'])[:, :2]
-        frameTimestamps = np.array(stream[f'frames/left/timestamps'])
-        saccadeTimestamps = np.array(stream[f'saccades/predicted/left/timestamps'])[:, 0]
-        spikeTimestamps = np.array(stream[f'spikes/timestamps'])
-        spikeClusters = np.array(stream[f'spikes/clusters'])
-        pValues = np.vstack([
-            np.array(stream['zeta/saccade/nasal/p']),
-            np.array(stream['zeta/saccade/temporal/p'])
-        ]).min(0)
-
-    # Compute velocity
-    tRaw = frameTimestamps[0] + np.cumsum(np.diff(frameTimestamps))
-    vRaw = np.diff(eyePosition, axis=0)
-    for j in range(vRaw.shape[1]):
-        i = np.where(np.isnan(vRaw[:, j]))[0]
-        vRaw[i, j] = np.interp(tRaw[i], tRaw, vRaw[:, j]) # Impute with interpolation
-
-    #
-    uniqueClusters = np.unique(spikeClusters)
-    if maximumProbabilityValue is None:
-        targetClusters = uniqueClusters
-    else:
-        clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
-        targetClusters = uniqueClusters[clusterIndices]
-
-    #
-    t1 = np.floor(tRaw.min())
-    t2 = np.ceil(tRaw.max())
-    bins = np.arange(t1, t2 + binsize, binsize)
-    xFull = np.full([bins.size - 1, len(targetClusters)], np.nan, dtype=np.float32)
-    for j, spikeCluster in enumerate(targetClusters):
-        counts, edges = np.histogram(
-            spikeTimestamps[spikeClusters == spikeCluster],
-            bins=bins
-        )
-        fr = (counts - counts.mean()) / counts.std()
-        xFull[:, j] = fr
-    xReduced = PCA(n_components=1).fit_transform(xFull)
-    del xFull
-    tReduced = bins[:-1] + ((bins[1] - bins[0]) / 2)
-    return xReduced, tReduced
-
-    # TODO: Figure out why activity along PC1 doesn't show visual response
-
-    #
-    X = list()
-    y = list()
-    binsForVelocity, M = psth2(np.array([0,]), np.array([0,]), window=windowForSaccades, binsize=binsize)
-    binsForSpikes, M = psth2(np.array([0,]), np.array([0,]), window=windowForSpikes, binsize=binsize)
-    n = saccadeTimestamps.size * binsForVelocity.size * binsForSpikes.size
-    counter = 0
-    for saccadeTimestamp in saccadeTimestamps:
-        for dtVelocity in binsForVelocity:
-            yi = np.array([
-                np.interp(saccadeTimestamp + dtVelocity, tRaw, vRaw[:, 0]),
-                np.interp(saccadeTimestamp + dtVelocity, tRaw, vRaw[:, 1]),
-            ])
-            Xi = list()
-            for dtSpikes in binsForSpikes:
-                end = '\r' if counter + 1 != n else '\n'
-                percent = counter / n * 100
-                print(f'Working on combination {counter + 1} out of {n} ... ({percent:.1f}%)', end=end)
-                ti = saccadeTimestamp + dtVelocity + dtSpikes
-                Xi.append(np.interp(ti, tReduced, xReduced.flatten()).item())
-                counter += 1
-            Xi = np.array(Xi)
-            X.append(Xi)
-            y.append(yi)
-    X = np.array(X)
-    y = np.array(y)
-
-    return X, y
-
 def getTimeRange(
-    filename,
+    spikeTimestamps,
+    spikeClusters=None,
+    targetCluster=None,
+    pad=5,
     ):
     """
     """
 
-    with h5py.File(filename, 'r') as stream:
-        spikeTimestamps = np.array(stream['spikes/timestamps'])
-    t1 = np.floor(spikeTimestamps.min())
-    t2 = np.ceil(spikeTimestamps.max())
+    if targetCluster is None:
+        spikeIndices = np.arange(spikeTimestamps)
+    else:
+        spikeIndices = np.where(spikeClusters == targetCluster)[0]
+    t1 = np.floor(spikeTimestamps[spikeIndices].min()) + pad
+    t2 = np.ceil(spikeTimestamps[spikeIndices].max()) - pad
 
     return t1, t2
 
-def loadEyeVelocity(
+def loadMlatiContinuous(
     filename,
-    ):
-    """
-    """
-
-    return
-
-def loadGratingContrast(
-    filename,
-    binsize=0.005,
-    riseTime=0.001,
-    probeDuration=0.05,
-    ):
-    """
-    """
-
-    #
-    t1, t2 = getTimeRange(filename)
-    t = np.arange(t1, t2, binsize) + (binsize / 2)
-
-    #
-    with h5py.File(filename, 'r') as stream:
-        probeTimestamps = np.array(stream['stimuli/dg/probe/timestamps'])
-    
-    #
-    xp = np.concatenate([
-        probeTimestamps - riseTime,
-        probeTimestamps,
-        probeTimestamps + probeDuration,
-        probeTimestamps + probeDuration + riseTime
-    ])
-    index = np.argsort(xp)
-    xp = xp[index]
-    fp = np.concatenate([
-        np.zeros(probeTimestamps.size),
-        np.ones(probeTimestamps.size),
-        np.ones(probeTimestamps.size),
-        np.zeros(probeTimestamps.size),
-    ])
-    fp = fp[index]
-
-    return t, np.interp(t, xp, fp)
-
-def loadNeuralData(
-    filename,
-    binsize=0.005,
+    binsize=0.05,
+    nlags=(10, 10),
     maximumProbabilityValue=0.001,
     ):
     """
@@ -291,11 +32,14 @@ def loadNeuralData(
 
     # Load datasets
     with h5py.File(filename, 'r') as stream:
+        eyePosition = np.array(stream['pose/filtered'])[:, 0]
+        nFramesRecorded = len(eyePosition)
+        frameTimestamps = np.array(stream['frames/left/timestamps'])[:nFramesRecorded]
         spikeTimestamps = np.array(stream[f'spikes/timestamps'])
         spikeClusters = np.array(stream[f'spikes/clusters'])
         pValues = np.vstack([
-            np.array(stream['zeta/probe/left/p']),
-            np.array(stream['zeta/probe/right/p'])
+            np.array(stream['zeta/saccade/nasal/p']),
+            np.array(stream['zeta/saccade/temporal/p'])
         ]).min(0)
 
     #
@@ -305,76 +49,273 @@ def loadNeuralData(
     else:
         clusterIndices = np.arange(len(uniqueClusters))[pValues < maximumProbabilityValue]
         targetClusters = uniqueClusters[clusterIndices]
+    nUnits = len(targetClusters)
 
     #
     t1, t2 = getTimeRange(filename)
-    bins = np.arange(t1, t2 + binsize, binsize)
-    t = bins[:-1] + (binsize / 2)
-    xFull = np.full([bins.size - 1, len(targetClusters)], np.nan, dtype=np.float32)
+    binEdges = np.arange(t1, t2 + binsize, binsize)
+    nBins = binEdges.size - 1
+    R = np.full([nBins, nUnits], np.nan, dtype=np.float16)
+
+    # Main loop
     for j, spikeCluster in enumerate(targetClusters):
+
+        # Compute histograms
         counts, edges = np.histogram(
             spikeTimestamps[spikeClusters == spikeCluster],
-            bins=bins
+            bins=binEdges
         )
-        # fr = (counts - counts.mean()) / counts.std()
         fr = counts / binsize
-        xFull[:, j] = fr
+        R[:, j] = fr
 
-    return t, xFull
+    #
+    nLags = sum(nlags) + 1
+    binOffsets = np.arange(-1 * nlags[0], nlags[1] + 1, 1)
+    X = np.full([nBins, nUnits * nLags], np.nan, dtype=np.float16)
+    for i, iBin in enumerate(range(nBins)):
+        end = '\r' if iBin + 1 != nBins else '\n'
+        print(f'Populating response matrix for time bin {iBin + 1} out of {nBins} ({(iBin + 1) / nBins * 100:.1f}%)', end=end)
+        for j, iUnit in enumerate(range(nUnits)):
+            for k, binOffset in enumerate(binOffsets):
+                if iBin + binOffset < 0:
+                    fr = 0.0
+                elif iBin + binOffset > nBins - 1:
+                    fr = 0.0
+                else:
+                    fr = R[iBin + binOffset, iUnit]
+                X[iBin, k * nUnits + iUnit] = fr
 
-def lag(
-    X,
-    y,
-    t,
-    lags=[0,],
-    nSamples=100,
-    eventTimestamps=None,
-    eventWindow=[-0.1, 0.1],
+    #
+    t1, t2 = getTimeRange(spikeTimestamps)
+    tRaw = frameTimestamps[:-1] + (np.diff(frameTimestamps) / 2)
+
+    #
+    vRaw = np.diff(eyePosition)
+    vRaw[np.isnan(vRaw)] = np.interp(tRaw[np.isnan(vRaw)], tRaw, vRaw) # Impute with interpolation
+    leftEdges = np.arange(t1, t2, binsize)
+    rightEdges = leftEdges + binsize
+    binEdges = np.vstack([leftEdges, rightEdges]).T
+    y = np.interp(binEdges.mean(1), tRaw, vRaw, left=np.nan, right=np.nan).reshape(-1, 1)
+
+    return R, X, y
+
+def loadMlati(
+    filename,
+    binsize=0.01,
+    eventWindow=(-0.1, 0.1),
+    laggedBins=(50, 50),
+    maximumProbabilityValue=0.001,
+    minimumFiringRate=0.2,
+    standardizeFiringRate=False,
+    spikeTimestamps=None,
+    spikeClusters=None
     ):
     """
     """
 
+    with h5py.File(filename, 'r') as stream:
+        eyePosition = np.array(stream['pose/filtered'])[:, 0]
+        nFramesRecorded = len(eyePosition)
+        frameTimestamps = np.array(stream['frames/left/timestamps'])[:nFramesRecorded]
+        if spikeTimestamps is None:
+            spikeTimestamps = np.array(stream[f'spikes/timestamps'])
+        if spikeClusters is None:
+            spikeClusters = np.array(stream[f'spikes/clusters'])
+        pValues = np.vstack([
+            np.array(stream['zeta/saccade/nasal/p']),
+            np.array(stream['zeta/saccade/temporal/p'])
+        ]).min(0)
+        saccadeTimestamps = np.array(stream['saccades/predicted/left/timestamps'])
+        saccadeLabels = np.array(stream['saccades/predicted/left/labels'])
+
     #
-    if eventTimestamps is None:
-        tEval = np.linspace(
-            low=t.min(),
-            high=t.max(),
-            size=nSamples + 2
-        )[1:-1]
+    tRaw = frameTimestamps[:-1] + (np.diff(frameTimestamps) / 2)
+    vRaw = np.diff(eyePosition)
+    vRaw[np.isnan(vRaw)] = np.interp(tRaw[np.isnan(vRaw)], tRaw, vRaw) # Impute with interpolation
+
+    #
+    y = list()
+    tEval = np.arange(eventWindow[0], eventWindow[1], binsize) + (binsize / 2)
+    for saccadeTimestamp in saccadeTimestamps[:, 0]:
+        wf = np.interp(
+            tEval + saccadeTimestamp,
+            tRaw,
+            vRaw
+        )
+        y.append(wf)
+    y = np.array(y)
+
+    # Exclude units without event-related activity
+    uniqueClusters = np.unique(spikeClusters)
+    if maximumProbabilityValue is None:
+        targetClusters = uniqueClusters
     else:
-        tEval = list()
-        eventIndices = np.random.choice(np.arange(eventTimestamps.size), size=nSamples, replace=True)
-        eventIndices.sort()
-        for eventTimestamp in eventTimestamps[eventIndices]:
-            if np.isnan(eventTimestamp):
-                continue
-            t1 = eventTimestamp + eventWindow[0]
-            t2 = eventTimestamp + eventWindow[1]
-            tEval.append(np.random.uniform(
-                low=t1,
-                high=t2,
-                size=1
-            ).item())
-        tEval = np.array(tEval)
+        clusterIndices = np.arange(len(uniqueClusters))[pValues <= maximumProbabilityValue]
+        targetClusters = uniqueClusters[clusterIndices]
 
-    #
-    xLag = np.full([nSamples, len(lags)], np.nan)
-    yLag = np.full([nSamples, 1], np.nan)
-
-    #
-    for i, ti in enumerate(tEval):
-        end = '\r' if (i + 1) < nSamples else '\n'
-        print(f'Generating sample {i + 1} out of {nSamples} ...', end=end)
-        for j, lag in enumerate(lags):
-            xLag[i, j] = np.interp(
-                ti + lag,
-                t,
-                X.flatten()
+    # Exclude units with too low of a firing rate (probabily partial units)
+    if minimumFiringRate is not None:
+        unitIndices = list()
+        for iUnit, targetCluster in enumerate(targetClusters):
+            t1, t2 = getTimeRange(
+                spikeTimestamps,
+                spikeClusters,
+                targetCluster,
+                pad=5   
             )
-        yLag[i, 0] = np.around(np.interp(
-            ti,
-            t,
-            y.flatten()
-        ), 0).item()
+            spikeIndices = np.where(spikeClusters == targetCluster)[0]
+            nBins = int((t2 - t1) / binsize)
+            nSpikes, binEdges_ = np.histogram(
+                spikeTimestamps[spikeIndices],
+                range=(t1, t2),
+                bins=nBins
+            )
+            xb = nSpikes.mean() / binsize
+            if xb < minimumFiringRate:
+                unitIndices.append(iUnit)
+        targetClusters = np.delete(targetClusters, unitIndices)
+    nUnits = len(targetClusters)
 
-    return xLag, yLag, tEval   
+    # Compute the edges of the time bins centered on the saccade
+    indexOffsets = np.arange(-1 * laggedBins[0], laggedBins[1] + 1, 1)
+    binCenters = indexOffsets * binsize
+    leftEdges = np.around(binCenters - (binsize / 2), 5)
+    rightEdges = leftEdges + binsize
+    binEdges = np.concatenate([leftEdges, rightEdges[-1:]])
+
+    # Compute histograms and store in response matrix of shape N units x M saccades x P time bins
+    R = list()
+    for iUnit, targetCluster in enumerate(targetClusters):
+        end = '\r' if iUnit + 1 != nUnits else '\n'
+        print(f'Computing histograms for unit {iUnit + 1} out of {nUnits} ...', end=end)
+        spikeIndices = np.where(spikeClusters == targetCluster)[0]
+        sample = list()
+        for saccadeTimestamp in saccadeTimestamps[:, 0]:
+            nSpikes, binEdges_ = np.histogram(
+                spikeTimestamps[spikeIndices],
+                bins=np.around(binEdges + saccadeTimestamp, 4)
+            )
+            fr = nSpikes / binsize
+            sample.append(fr)
+        R.append(sample)
+    R = np.array(R)
+
+    # Standardize the firing rate
+    if standardizeFiringRate:
+        for iUnit, targetCluster in enumerate(targetClusters):
+            t1, t2 = getTimeRange(
+                spikeTimestamps,
+                spikeClusters,
+                targetCluster,
+                pad=5
+            )
+            spikeIndices = np.where(spikeClusters == targetCluster)[0]
+            nBins = int((t2 - t1) / binsize)
+            nSpikes, binEdges_ = np.histogram(
+                spikeTimestamps[spikeIndices],
+                range=(t1, t2),
+                bins=nBins
+            )
+            xb = nSpikes.mean() / binsize
+            sd = nSpikes.std() / binsize
+            R[iUnit] = ((R[iUnit] - xb) / sd)
+
+    # Populate response matrix
+    X = list()
+    nSaccades = saccadeTimestamps.shape[0]
+    for iSaccade in range(nSaccades):
+        sample = list()
+        for offset in indexOffsets:  # Outer loop over lags
+            for iUnit in range(nUnits):  # Inner loop over neurons
+                binIndex = int((R.shape[2] - 1) / 2) + offset
+                fr = R[iUnit, iSaccade, binIndex]
+                sample.append(fr)
+        X.append(sample)
+    X = np.array(X)
+
+    # Return the direction of each saccade
+    z = saccadeLabels.reshape(-1, 1)
+
+    # Remove samples with NaN values
+    mask = np.vstack([
+        np.isnan(X).any(1),
+        np.isnan(y).any(1),
+        np.isnan(z).any(1)
+    ]).any(0)
+    X = np.delete(X, mask, axis=0)
+    y = np.delete(y, mask, axis=0)
+    z = np.delete(z, mask, axis=0)
+
+    return R, X, y, z, tEval, binCenters
+
+def generateFakeSpikes(
+    saccadeTimestamps,
+    nUnits=10,
+    responseLatency=-0.05,
+    responseVariability=0.03,
+    responseProbability=0.7,
+    minimumSpikeCount=0,
+    maximumSpikeCount=10,
+    baselineFiringRate=2,
+    minimumInterSpikeInterval=0.005,
+    dropoutRate=0.1,
+    pad=3
+    ):
+    """
+    """
+
+    spikeTimestamps = list()
+    spikeClusters = list()
+    saccadeTimestampsFiltered = saccadeTimestamps[np.invert(np.isnan(saccadeTimestamps[:, 0])), 0]
+    t1 = saccadeTimestampsFiltered.min() - pad
+    t2 = saccadeTimestampsFiltered.max() + pad
+    for iUnit in range(nUnits):
+
+        end = '\r' if iUnit + 1 != nUnits else '\n'
+        print(f'Generating spikes for unit {iUnit + 1} out of {nUnits}', end=end)
+
+        #
+        t = list()
+        c = list()
+
+        # Random activity
+        nSpikes = int(round((t2 - t1) * baselineFiringRate, 0))
+        for spikeTimestamp in np.random.uniform(low=t1, high=t2, size=nSpikes):
+            t.append(spikeTimestamp)
+            c.append(iUnit + 1)
+
+        # Units with no event-related activity
+        dropUnit = np.random.choice([True, False], p=[dropoutRate, 1 - dropoutRate])
+        if dropUnit:
+            for spikeTimestamp in t:
+                spikeTimestamps.append(spikeTimestamp)
+            for spikeCluster in c:
+                spikeClusters.append(spikeCluster)
+            continue
+
+        # Event-related activity
+        for saccadeTimestamp in saccadeTimestampsFiltered:
+            if np.isnan(saccadeTimestamp):
+                continue
+            responseElicited = np.random.choice([True, False], p=[1 - responseProbability, responseProbability])
+            if responseElicited:
+                nSpikes = int(np.random.choice(np.arange(minimumSpikeCount, maximumSpikeCount + 1)))
+                for spikeTimestamp in np.random.normal(loc=responseLatency, scale=responseVariability, size=nSpikes):
+
+                    # Enforce refractory period
+                    dt = np.min(np.abs(np.array(t) - spikeTimestamp))
+                    if dt < minimumInterSpikeInterval:
+                        continue
+                    
+                    t.append(round(spikeTimestamp + saccadeTimestamp, 3))
+                    c.append(iUnit + 1)
+        
+        #
+        for spikeTimestamp in t:
+            spikeTimestamps.append(spikeTimestamp)
+        for spikeCluster in c:
+            spikeClusters.append(spikeCluster)
+
+    spikeTimestamps, spikeClusters = np.array(spikeTimestamps), np.array(spikeClusters)
+    index = np.argsort(spikeTimestamps)
+    return spikeTimestamps[index], spikeClusters[index]
